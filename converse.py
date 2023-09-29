@@ -9,6 +9,8 @@ from elevenlabs import generate,  stream, set_api_key
 import threading
 import openai
 import time
+import speech_recognition as sr
+from io import BytesIO
 
 class App:
     def __init__(self, root):
@@ -28,7 +30,7 @@ class App:
         self.record_btn_canvas.pack(side='left')
         self.record_btn_canvas.create_rectangle(10, 10, 190, 190, fill='gray', outline='gray')
         self.record_btn_canvas.create_oval(70, 70, 130, 130, fill='red', outline='red')
-        self.record_btn_canvas.bind("<Button-1>", self.toggle_recording)
+        self.record_btn_canvas.bind("<Button-1>", self.toggle_listener)
         
         # # green play arrow greyed out
         self.playback_btn_canvas = Canvas(root, width=200, height=200, bg='white')
@@ -45,84 +47,40 @@ class App:
 
         return file_path
 
-    def toggle_recording(self, event):
-        if self.is_recording:
-            self.is_recording = False
+    def toggle_listener(self, event):
+        if hasattr(self, 'stop_listening'):
+            self.stop_listening(wait_for_stop=False)
+            del self.stop_listening
+            # indicate that listener is off
+            self.record_btn_canvas.create_rectangle(10, 10, 190, 190, fill='gray', outline='gray')
+            self.record_btn_canvas.create_oval(70, 70, 130, 130, fill='red', outline='red')
         else:
-            self.start_recording()
+            self.start_listening()
 
-    def start_recording(self):
-        self.is_recording = True
+    def start_listening(self):
+        timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.folder_name = f"Conversation-{timestamp_str}"
+        os.makedirs(self.folder_name, exist_ok=True)
+        self.recognizer = sr.Recognizer()
+        self.microphone = sr.Microphone()
+        with self.microphone as source:
+            self.recognizer.adjust_for_ambient_noise(source)
+        self.stop_listening = self.recognizer.listen_in_background(self.microphone, self.callback)
+        # indicate listener is now on
+        self.record_btn_canvas.create_rectangle(10, 10, 190, 190, fill='green', outline='green')
 
-        if (self.first_recording):
-            timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            self.folder_name = f"Conversation-{timestamp_str}"
-            os.makedirs(self.folder_name, exist_ok=True)
-            self.first_recording = False
-        
-        # red square appears when recording starts
-        self.record_btn_canvas.create_rectangle(10, 10, 190, 190, fill='red', outline='red')
-        print("Start recording")
-        
-        # recording thread
-        threading.Thread(target=self.record).start()
-
-    def record(self):
-        p = pyaudio.PyAudio()
-        
-        # open audio interface
-        stream = p.open(format=pyaudio.paInt16,
-                                  channels=1,
-                                  rate=44100,
-                                  input=True,
-                                  frames_per_buffer=1024)
-        frames = []
-
-        while self.is_recording:
-            data = stream.read(1024)
-            frames.append(data)
-
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
-
-        self.record_btn_canvas.create_rectangle(10, 10, 190, 190, fill='gray', outline='gray')
-        self.record_btn_canvas.create_oval(70, 70, 130, 130, fill='red', outline='red')
-        print("Stop recording")
-
-        wav_file_path = self.save_temp_audio("audio", self.folder_name, "wav")
-
-        with wave.open(wav_file_path, 'wb') as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
-            wf.setframerate(44100)
-            wf.writeframes(b''.join(frames))
-
-        
-        # wav to mp3
-        self.mp3_file_path = os.path.splitext(wav_file_path)[0] + '.mp3'
-        AudioSegment.from_wav(wav_file_path).export(self.mp3_file_path, format='mp3')
-
-        os.remove(wav_file_path)
-        
-        # enable playback button
-        self.playback_btn_canvas.create_rectangle(10, 10, 190, 190, fill='gray', outline='gray')
-        self.playback_btn_canvas.create_polygon(80, 50, 80, 150, 150, 100, fill='green', outline='green')
-        self.is_audio_ready = True
-
-    def send_to_whisper(self, audio_file_path):
-        openai.api_base = "https://api.openai.com/v1"
-        openai.api_key_path = "openai.txt"
-
+    def callback(self, recognizer, audio):
         try:
-            audio_file= open(audio_file_path, "rb")
-            transcript = openai.Audio.translate("whisper-1", audio_file)
-            return transcript['text']
-        except FileNotFoundError:
-            raise Exception(f"Audio file not found: {audio_file_path}")
+            wav_data = BytesIO(audio.get_wav_data())
+            wav_file_path = self.save_temp_audio("audio", self.folder_name, "wav")
+            with open(wav_file_path, 'wb') as f:
+                f.write(wav_data.read())
+
+            transcription = self.send_to_whisper(wav_file_path)
+
+            self.craft_response(transcription)
         except Exception as e:
-            raise Exception(f"Error transcribing audio: {str(e)}")
-        
+            print("Could not request results from Whisper API; {0}".format(e))        
 
     def send_to_gpt(self, transcription):
         openai.api_base = "https://openrouter.ai/api/v1"
@@ -157,7 +115,18 @@ class App:
                 self.message_history.append({"role": "assistant", "content": response_content})
                 return ""
 
-        
+    def send_to_whisper(self, audio_file_path):
+        openai.api_base = "https://api.openai.com/v1"
+        openai.api_key_path = "openai.txt"
+
+        try:
+            audio_file= open(audio_file_path, "rb")
+            transcript = openai.Audio.translate("whisper-1", audio_file)
+            return transcript['text']
+        except FileNotFoundError:
+            raise Exception(f"Audio file not found: {audio_file_path}")
+        except Exception as e:
+            raise Exception(f"Error transcribing audio: {str(e)}")
 
     def text_to_speech(self, transcript):
         with open('eleven.txt', 'r') as file:
@@ -175,9 +144,8 @@ class App:
         
         stream(audio_stream)
 
-    def craft_response(self, _):
-        transcription = self.send_to_whisper(self.mp3_file_path)
-        print("Transcription: " + transcription)
+    def craft_response(self, transcription):
+        print(transcription)
         self.text_to_speech(transcription)
 
 
