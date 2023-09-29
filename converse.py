@@ -15,6 +15,8 @@ class App:
         self.root = root
         self.root.title("Active Listener AI")
 
+        self.message_history = []
+
         self.mp3_file_path = ""
         
         self.first_recording = True
@@ -126,33 +128,40 @@ class App:
         openai.api_base = "https://openrouter.ai/api/v1"
         openai.api_key_path = "openrouter.txt"
 
+        self.message_history.append({"role": "user", "content": transcription})
+
+        messages = [
+            {"role": "system", "content": "You are a helpful virtual assistant. Limit your responses to be as concise as possible unless the user specifically requests otherwise."},
+        ] + self.message_history
+
         response = openai.ChatCompletion.create(
           #model = "",
           model="openai/gpt-3.5-turbo",
-          messages=[
-                {"role": "system", "content": "You are a helpful virtual assistant. Limit your responses to be as concise as possible unless the user specifically requests otherwise."},
-                {"role": "user", "content": transcription}
-            ],
+          messages=messages,
           headers={
             "HTTP-Referer": "http://bogusz.co",
           },
           stream=True,
         )
 
+        response_content = ""
+
         for chunk in response:
             part = chunk['choices'][0]['delta']
             if len(part) != 0:
                 text = part['content']
+                response_content += text
                 text = text.replace('\n', '. ')
                 yield text
             else:
+                self.message_history.append({"role": "assistant", "content": response_content})
                 return ""
 
         
 
     def text_to_speech(self, transcript):
         with open('eleven.txt', 'r') as file:
-        api_key = file.read().strip()
+            api_key = file.read().strip()
     
         set_api_key(api_key)
         
